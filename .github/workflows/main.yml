@@ -1,0 +1,95 @@
+name: RDP-Cloudflare
+
+on:
+  workflow_dispatch:
+
+jobs:
+  rdp:
+    runs-on: windows-latest
+    timeout-minutes: 360
+
+    steps:
+
+      # =========================
+      # ENABLE RDP
+      # =========================
+      - name: Enable Remote Desktop
+        run: |
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' `
+            -Name "fDenyTSConnections" -Value 0 -Force
+
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
+            -Name "UserAuthentication" -Value 0 -Force
+
+          netsh advfirewall firewall add rule name="RDP" dir=in action=allow protocol=TCP localport=3389
+
+          Restart-Service TermService -Force
+
+      # =========================
+      # CREATE USER
+      # =========================
+      - name: Create RDP User
+        run: |
+          $user="loli"
+          $pass="loli123"
+
+          $secure = ConvertTo-SecureString $pass -AsPlainText -Force
+
+          if (Get-LocalUser -Name $user -ErrorAction SilentlyContinue) {
+              Remove-LocalUser $user
+          }
+
+          New-LocalUser -Name $user -Password $secure -AccountNeverExpires
+          Add-LocalGroupMember -Group "Administrators" -Member $user
+          Add-LocalGroupMember -Group "Remote Desktop Users" -Member $user
+
+          echo "RDP_USER=$user" >> $env:GITHUB_ENV
+          echo "RDP_PASS=$pass" >> $env:GITHUB_ENV
+
+      # =========================
+      # DOWNLOAD CLOUDFLARE
+      # =========================
+      - name: Install Cloudflared
+        run: |
+          Invoke-WebRequest `
+            https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe `
+            -OutFile cloudflared.exe
+
+      # =========================
+      # START PUBLIC TCP TUNNEL
+      # =========================
+      - name: Start Cloudflare Tunnel
+        shell: powershell
+        run: |
+          Start-Process -FilePath ".\cloudflared.exe" `
+            -ArgumentList "tunnel --url tcp://localhost:3389 --no-autoupdate" `
+            -RedirectStandardOutput tunnel.log `
+            -RedirectStandardError tunnel.log `
+            -NoNewWindow
+
+          Write-Host "Waiting tunnel..."
+          Start-Sleep 15
+
+          $log = Get-Content tunnel.log
+          $tcp = $log | Select-String "trycloudflare.com"
+
+          echo "TUNNEL_INFO=$tcp" >> $env:GITHUB_ENV
+
+      # =========================
+      # SHOW INFO + KEEP ALIVE
+      # =========================
+      - name: Show RDP Info
+        run: |
+          Write-Host ""
+          Write-Host "=============================="
+          Write-Host "      PUBLIC RDP READY 🚀"
+          Write-Host "=============================="
+          Write-Host $env:TUNNEL_INFO
+          Write-Host "User: $env:RDP_USER"
+          Write-Host "Pass: $env:RDP_PASS"
+          Write-Host "=============================="
+
+          while ($true) {
+            Write-Host "[$(Get-Date)] Running..."
+            Start-Sleep 300
+          }
